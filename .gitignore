@@ -1,0 +1,61 @@
+# Zig build artifacts
+zig-out/
+zig-cache/
+
+# OS-specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Build outputs
+*.exe
+*.dll
+*.so
+*.dylib
+*.lib
+*.a
+
+# Test artifacts
+*.profraw
+*.profdata
+
+# Coverage reports
+coverage/
+
+# Debug symbols
+*.pdb
+
+# Valgrind logs
+callgrind.out.*
+massif.out.*
+
+# LLVM/Clang artifacts
+*.ll
+*.bc
+
+# CMake artifacts (if using cmake)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Nix artifacts (if using nix)
+result/
