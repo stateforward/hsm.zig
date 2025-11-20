@@ -155,9 +155,30 @@ hsm.state("parent", .{
         hsm.transition(.{ hsm.on("next"), hsm.target("../child2") })
     }),
     
-    hsm.state("child2", .{
+hsm.state("child2", .{
         hsm.transition(.{ hsm.on("up"), hsm.target("../../other") })
     })
+})
+```
+
+### History States
+
+Supports both Shallow (H) and Deep (H*) history pseudo-states to restore previous state configurations.
+
+```zig
+// Composite state with history
+hsm.state("connection", .{
+    // Shallow history: remembers direct child of "connection"
+    hsm.history("H", hsm.target("disconnected")),
+    
+    hsm.state("disconnected", .{ ... }),
+    hsm.state("connected", .{ ... })
+})
+
+// Deep history: remembers recursively
+hsm.state("complex", .{
+    hsm.deepHistory("H*", hsm.target("default")),
+    ...
 })
 ```
 

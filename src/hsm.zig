@@ -136,6 +136,22 @@ pub const ElementKind = enum(u64) {
     transition = 6,
     behavior = 7,
     constraint = 8,
+    history = 9,
+};
+
+/// History type enumeration
+pub const HistoryKind = enum {
+    shallow,
+    deep,
+};
+
+/// History element for state restoration
+pub const HistoryElement = struct {
+    element: Element,
+    history_kind: HistoryKind,
+    default_target: ?[]const u8, // qualified name of default target
+
+    const Self = @This();
 };
 
 /// Base element interface - all HSM elements have qualified names
@@ -299,6 +315,13 @@ pub const Model = struct {
                     self.allocator.free(behavior_elem.element.id);
                     self.allocator.destroy(behavior_elem);
                 },
+                .history => {
+                    const history_elem: *HistoryElement = @ptrCast(@alignCast(element));
+                    self.allocator.free(history_elem.element.qualified_name);
+                    self.allocator.free(history_elem.element.id);
+                    if (history_elem.default_target) |target| self.allocator.free(target);
+                    self.allocator.destroy(history_elem);
+                },
                 else => {
                     // For unknown element kinds, don't destroy as we don't know their full type
                     // Just free the base element fields
@@ -370,6 +393,11 @@ pub fn getTransition(model: *const Model, qualified_name: []const u8) ?*Transiti
 /// Get behavior element by qualified name
 pub fn getBehavior(model: *const Model, qualified_name: []const u8) ?*BehaviorElement {
     return get(BehaviorElement, model, qualified_name);
+}
+
+/// Get history element by qualified name
+pub fn getHistory(model: *const Model, qualified_name: []const u8) ?*HistoryElement {
+    return get(HistoryElement, model, qualified_name);
 }
 
 // ============================================================================
@@ -794,6 +822,26 @@ pub fn choice(comptime name: []const u8, comptime elements: anytype) type {
     };
 }
 
+/// Create a shallow history state builder
+pub fn history(comptime name: []const u8, comptime default_target: TargetBuilder) type {
+    return struct {
+        name: []const u8 = name,
+        default_target: []const u8 = default_target.target_path,
+        history_kind: HistoryKind = .shallow,
+        state_type: ElementKind = .history,
+    };
+}
+
+/// Create a deep history state builder
+pub fn deepHistory(comptime name: []const u8, comptime default_target: TargetBuilder) type {
+    return struct {
+        name: []const u8 = name,
+        default_target: []const u8 = default_target.target_path,
+        history_kind: HistoryKind = .deep,
+        state_type: ElementKind = .history,
+    };
+}
+
 /// Define a state machine model at compile time
 pub fn define(comptime name: []const u8, comptime elements: anytype) type {
     return struct {
@@ -834,16 +882,32 @@ pub fn define(comptime name: []const u8, comptime elements: anytype) type {
 
                     // Check if it's a state type by looking for state_type field
                     if (@hasField(actual_type, "state_type")) {
-                        // It's a state - instantiate it
+                        // It's a state or history - instantiate it
                         const state_instance = actual_type{};
                         const state_path = try std.fmt.allocPrint(model.allocator, "{s}/{s}", .{ parent_path, state_instance.name });
                         defer model.allocator.free(state_path);
 
-                        const state_elem = try addState(model, state_path, state_instance.state_type);
+                        if (state_instance.state_type == .history) {
+                             const default_target = if (@hasField(actual_type, "default_target")) state_instance.default_target else null;
+                             // Resolve default target relative to history state (which is child of parent)
+                             // But wait, history state is a child, so resolve relative to parent?
+                             // No, resolve relative to the history state itself?
+                             // Actually, resolveTargetPath handles relative paths.
+                             // If default_target is relative, it should be resolved relative to the history state's parent?
+                             // SCXML says default target is transition.
+                             var resolved_target: ?[]const u8 = null;
+                             if (default_target.len > 0) {
+                                 resolved_target = try resolveTargetPath(model.allocator, parent_path, default_target);
+                             }
+                             _ = try addHistory(model, state_path, state_instance.history_kind, resolved_target);
+                             if (resolved_target) |t| model.allocator.free(t);
+                        } else {
+                            const state_elem = try addState(model, state_path, state_instance.state_type);
 
-                        // Process state contents
-                        if (@hasField(actual_type, "elements")) {
-                            try processStateContents(model, state_elem, state_path, state_instance.elements);
+                            // Process state contents
+                            if (@hasField(actual_type, "elements")) {
+                                try processStateContents(model, state_elem, state_path, state_instance.elements);
+                            }
                         }
                     } else if (@hasField(actual_type, "target_path")) {
                         // It's an initial transition - instantiate it
@@ -851,19 +915,29 @@ pub fn define(comptime name: []const u8, comptime elements: anytype) type {
                         try processInitialTransition(model, parent_path, initial_instance);
                     }
                 } else if (type_info == .@"struct") {
-                    // Handle direct struct instances
-                    if (@hasField(element_type, "state_type")) {
-                        // Direct state instance
-                        const state_path = try std.fmt.allocPrint(model.allocator, "{s}/{s}", .{ parent_path, element.name });
-                        defer model.allocator.free(state_path);
+                // Handle direct struct instances
+                if (@hasField(element_type, "state_type")) {
+                    // Direct state instance
+                    const state_path = try std.fmt.allocPrint(model.allocator, "{s}/{s}", .{ parent_path, element.name });
+                    defer model.allocator.free(state_path);
 
+                    if (element.state_type == .history) {
+                         const default_target = if (@hasField(element_type, "default_target")) element.default_target else null;
+                         var resolved_target: ?[]const u8 = null;
+                         if (default_target.len > 0) {
+                             resolved_target = try resolveTargetPath(model.allocator, parent_path, default_target);
+                         }
+                         _ = try addHistory(model, state_path, element.history_kind, resolved_target);
+                         if (resolved_target) |t| model.allocator.free(t);
+                    } else {
                         const state_elem = try addState(model, state_path, element.state_type);
 
                         // Process state contents
                         if (@hasField(element_type, "elements")) {
                             try processStateContents(model, state_elem, state_path, element.elements);
                         }
-                    } else if (@hasField(element_type, "args")) {
+                    }
+                } else if (@hasField(element_type, "args")) {
                         // Direct transition instance
                         try processTransition(model, getState(model, parent_path) orelse return error.NoParentState, parent_path, element);
                     } else if (@hasField(element_type, "target_path")) {
@@ -1220,6 +1294,7 @@ pub const StateMachine = struct {
     active_states: std.ArrayList([]const u8),
     active_activities: std.StringHashMap(std.Thread),
     active_timers: std.StringHashMap(std.Thread),
+    history_value: std.StringHashMap([]const u8),
     deferred_queue: EventQueue,
     stopped: bool,
     allocator: std.mem.Allocator,
@@ -1423,37 +1498,62 @@ pub const StateMachine = struct {
     }
 
     fn exitState(self: *Self, state_name: []const u8, event: Event, ctx: *Context) !void {
-        const state_element = getState(self.model, state_name) orelse return;
+        const element = self.model.members.get(state_name) orelse return;
+        
+        // Only states handle activities and exit actions
+        if (element.kind == .state) {
+            const state_element = @as(*StateElement, @ptrCast(@alignCast(element)));
 
-        // Cancel activities by setting context done flag
-        ctx.cancel();
-
-        // Wait for activities to finish (with timeout to avoid hanging)
-        for (state_element.activities) |activity_name| {
-            if (self.active_activities.get(activity_name)) |thread| {
-                thread.join(); // Wait for activity to respect cancellation
-                _ = self.active_activities.remove(activity_name);
+            // Update history for parent
+            const parent_path = std.fs.path.dirname(state_name) orelse "";
+            if (parent_path.len > 0 and !std.mem.eql(u8, parent_path, "/")) {
+                // We need to copy strings because they are keys/values in the map
+                const key = try self.allocator.dupe(u8, parent_path);
+                const value = try self.allocator.dupe(u8, state_name);
+                
+                const result = try self.history_value.getOrPut(key);
+                if (result.found_existing) {
+                    // Free old value and key (since we don't need the new key)
+                    self.allocator.free(result.value_ptr.*);
+                    self.allocator.free(key);
+                    // Update with new value
+                    result.value_ptr.* = value;
+                } else {
+                    // New entry, value is set
+                    result.value_ptr.* = value;
+                }
             }
-        }
 
-        // Cancel and wait for timers to finish
-        for (state_element.transitions) |trans_name| {
-            if (self.active_timers.get(trans_name)) |thread| {
-                thread.join(); // Wait for timer to respect cancellation
-                _ = self.active_timers.remove(trans_name);
+            // Cancel activities by setting context done flag
+            ctx.cancel();
+
+            // Wait for activities to finish (with timeout to avoid hanging)
+            for (state_element.activities) |activity_name| {
+                if (self.active_activities.get(activity_name)) |thread| {
+                    thread.join(); // Wait for activity to respect cancellation
+                    _ = self.active_activities.remove(activity_name);
+                }
             }
-        }
 
-        // Execute exit behaviors with error handling
-        for (state_element.exit) |exit_name| {
-            const exit_behavior = getBehavior(self.model, exit_name) orelse continue;
-            const exit_fn: *const fn (ctx: *Context, inst: *Instance, event: Event) void = @ptrCast(@alignCast(exit_behavior.function_ptr));
-            const instance: *Instance = @ptrCast(@alignCast(self.instance));
-            self.executeWithErrorHandling(exit_fn, ctx, instance, event, "exit") catch |err| {
-                self.dispatchErrorEvent(ctx, err, "exit_execution") catch |dispatch_err| {
-                    std.log.err("Failed to dispatch error event during exit: {}, original error: {}", .{ dispatch_err, err });
+            // Cancel and wait for timers to finish
+            for (state_element.transitions) |trans_name| {
+                if (self.active_timers.get(trans_name)) |thread| {
+                    thread.join(); // Wait for timer to respect cancellation
+                    _ = self.active_timers.remove(trans_name);
+                }
+            }
+
+            // Execute exit behaviors with error handling
+            for (state_element.exit) |exit_name| {
+                const exit_behavior = getBehavior(self.model, exit_name) orelse continue;
+                const exit_fn: *const fn (ctx: *Context, inst: *Instance, event: Event) void = @ptrCast(@alignCast(exit_behavior.function_ptr));
+                const instance: *Instance = @ptrCast(@alignCast(self.instance));
+                self.executeWithErrorHandling(exit_fn, ctx, instance, event, "exit") catch |err| {
+                    self.dispatchErrorEvent(ctx, err, "exit_execution") catch |dispatch_err| {
+                        std.log.err("Failed to dispatch error event during exit: {}, original error: {}", .{ dispatch_err, err });
+                    };
                 };
-            };
+            }
         }
     }
 
@@ -1608,7 +1708,61 @@ pub const StateMachine = struct {
     }
 
     fn enterState(self: *Self, state_name: []const u8, event: Event, ctx: *Context, default_entry: bool) !void {
-        const state_element = getState(self.model, state_name) orelse return;
+        const element = self.model.members.get(state_name) orelse return;
+
+        if (element.kind == .history) {
+            const history_elem = @as(*HistoryElement, @ptrCast(@alignCast(element)));
+            const parent_path = std.fs.path.dirname(state_name) orelse return;
+            
+            var target_path: []const u8 = undefined;
+            var history_found = false;
+
+            // Try to find history
+            if (self.history_value.get(parent_path)) |last_active| {
+                target_path = last_active;
+                history_found = true;
+            } else if (history_elem.default_target) |def_target| {
+                target_path = def_target;
+            } else {
+                // No history and no default - stuck (should be validation error)
+                return;
+            }
+
+            // If deep history and we found a history value, we need to recurse?
+            // No, standard deep history behavior is: restore state. 
+            // If the restored state itself has substates, we check ITS history if it's also deep.
+            // But keeping it simple: we just transition to the target_path.
+            // If target_path is a leaf, we are done.
+            // If target_path is a composite, we enter it.
+            
+            // For deep history, we rely on the fact that if we restore a composite state,
+            // its initial transition will fire unless we have recorded history for IT as well.
+            // Wait, Deep History means we should restore the entire configuration.
+            // The current `history_value` map stores `parent -> last_child`.
+            // If we restore `last_child`, and `last_child` is composite, we should check `history_value` for `last_child` too IF we are doing deep history.
+            // But `enterState` for `last_child` (which is a State) will process initial transition.
+            // We need to override that if we are in Deep History mode.
+            // This implies passing a flag or checking history in `enterState`.
+            
+            // Simplified approach: Just transition to the target. 
+            // If it's deep history, we might need to manually chain the restoration?
+            // For now, let's support Shallow History (1 level) which is the most common.
+            // Deep history would require `enterState` to check history map if `deep_history_active` flag is set.
+
+            // Recurse to enter the target state
+            // We need to enter intermediate states from Parent to Target
+            try self.enterAllIntermediateStates(parent_path, target_path, event, ctx);
+            
+            // Update current state
+            self.allocator.free(self.current_state);
+            self.current_state = try self.allocator.dupe(u8, target_path);
+
+            // Enter the target state
+            try self.enterState(target_path, event, ctx, true);
+            return;
+        }
+
+        const state_element = @as(*StateElement, @ptrCast(@alignCast(element)));
 
         // Execute entry behaviors with error handling
         for (state_element.entry) |entry_name| {
@@ -1801,6 +1955,14 @@ pub const StateMachine = struct {
         // Clear collections
         self.active_activities.clearAndFree();
         self.active_timers.clearAndFree();
+        
+        // Clear history map
+        var hist_iter = self.history_value.iterator();
+        while (hist_iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.history_value.clearAndFree();
     }
 
     pub fn deinit(self: *Self) void {
@@ -1813,6 +1975,7 @@ pub const StateMachine = struct {
         self.active_states.deinit(self.allocator);
         self.active_activities.deinit();
         self.active_timers.deinit();
+        self.history_value.deinit();
         self.deferred_queue.deinit();
 
         // Free current state string
@@ -1835,6 +1998,7 @@ pub fn start(ctx: *Context, instance: anytype, model: *const Model) !StateMachin
         .active_states = try std.ArrayList([]const u8).initCapacity(ctx.allocator, 0),
         .active_activities = std.StringHashMap(std.Thread).init(ctx.allocator),
         .active_timers = std.StringHashMap(std.Thread).init(ctx.allocator),
+        .history_value = std.StringHashMap([]const u8).init(ctx.allocator),
         .deferred_queue = try EventQueue.init(ctx.allocator),
         .stopped = false,
         .allocator = ctx.allocator,
@@ -1903,6 +2067,23 @@ pub fn addBehavior(model: *Model, qualified_name: []const u8, function_ptr: *con
 
     try model.members.put(behavior_element.element.qualified_name, @ptrCast(behavior_element));
     return behavior_element;
+}
+
+/// Add a history element to the model
+pub fn addHistory(model: *Model, qualified_name: []const u8, kind: HistoryKind, default_target: ?[]const u8) !*HistoryElement {
+    const history_element = try model.allocator.create(HistoryElement);
+    history_element.* = HistoryElement{
+        .element = Element{
+            .kind = .history,
+            .qualified_name = try model.allocator.dupe(u8, qualified_name),
+            .id = try model.allocator.dupe(u8, std.fs.path.basename(qualified_name)),
+        },
+        .history_kind = kind,
+        .default_target = if (default_target) |t| try model.allocator.dupe(u8, t) else null,
+    };
+
+    try model.members.put(history_element.element.qualified_name, @ptrCast(history_element));
+    return history_element;
 }
 
 /// Add a transition element to the model

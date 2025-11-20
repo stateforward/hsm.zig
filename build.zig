@@ -186,6 +186,15 @@ pub fn build(b: *std.Build) void {
     });
     timer_transitions_tests.root_module.addImport("hsm", hsm_lib.root_module);
 
+    const history_tests = b.addTest(.{
+        .root_module = b.addModule("root", .{
+            .root_source_file = b.path("tests/history_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    history_tests.root_module.addImport("hsm", hsm_lib.root_module);
+
     const run_basic_tests = b.addRunArtifact(basic_tests);
     const run_choice_tests = b.addRunArtifact(choice_tests);
     const run_hierarchical_tests = b.addRunArtifact(hierarchical_tests);
@@ -193,6 +202,7 @@ pub fn build(b: *std.Build) void {
     const run_guard_conditions_tests = b.addRunArtifact(guard_conditions_tests);
     const run_effects_tests = b.addRunArtifact(effects_tests);
     const run_timer_transitions_tests = b.addRunArtifact(timer_transitions_tests);
+    const run_history_tests = b.addRunArtifact(history_tests);
 
     test_step.dependOn(&run_basic_tests.step);
     test_step.dependOn(&run_choice_tests.step);
@@ -201,4 +211,5 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_guard_conditions_tests.step);
     test_step.dependOn(&run_effects_tests.step);
     test_step.dependOn(&run_timer_transitions_tests.step);
+    test_step.dependOn(&run_history_tests.step);
 }
