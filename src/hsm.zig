@@ -319,7 +319,7 @@ pub const Model = struct {
                     const history_elem: *HistoryElement = @ptrCast(@alignCast(element));
                     self.allocator.free(history_elem.element.qualified_name);
                     self.allocator.free(history_elem.element.id);
-                    if (history_elem.default_target) |target| self.allocator.free(target);
+                    if (history_elem.default_target) |t_target| self.allocator.free(t_target);
                     self.allocator.destroy(history_elem);
                 },
                 else => {
@@ -1272,16 +1272,28 @@ pub const EventQueue = struct {
     }
 
     pub fn enqueue(self: *Self, event: Event) !void {
-        try self.events.append(self.allocator, event);
+        try self.push(event);
     }
 
     pub fn dequeue(self: *Self) ?Event {
+        return self.pop();
+    }
+
+    pub fn push(self: *Self, event: Event) !void {
+        try self.events.append(self.allocator, event);
+    }
+
+    pub fn pop(self: *Self) ?Event {
         if (self.events.items.len == 0) return null;
         return self.events.orderedRemove(0);
     }
 
+    pub fn len(self: *const Self) usize {
+        return self.events.items.len;
+    }
+
     pub fn isEmpty(self: *const Self) bool {
-        return self.events.items.len == 0;
+        return self.len() == 0;
     }
 };
 
@@ -1958,9 +1970,9 @@ pub const StateMachine = struct {
         
         // Clear history map
         var hist_iter = self.history_value.iterator();
-        while (hist_iter.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.*);
+        while (hist_iter.next()) |h_entry| {
+            self.allocator.free(h_entry.key_ptr.*);
+            self.allocator.free(h_entry.value_ptr.*);
         }
         self.history_value.clearAndFree();
     }

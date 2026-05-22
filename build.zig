@@ -75,6 +75,22 @@ pub fn build(b: *std.Build) void {
     basic_demo.root_module.addImport("hsm", hsm_lib.root_module);
     b.installArtifact(basic_demo);
 
+    // Create traffic light benchmark
+    const traffic_light_bench = b.addExecutable(.{
+        .name = "traffic_light_bench",
+        .root_module = b.addModule("root", .{
+            .root_source_file = b.path("bench/traffic_light_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    traffic_light_bench.root_module.addImport("hsm", hsm_lib.root_module);
+    
+    const traffic_light_bench_install = b.addInstallArtifact(traffic_light_bench, .{});
+    const traffic_light_bench_step = b.step("traffic_light_bench", "Build the traffic light benchmark");
+    traffic_light_bench_step.dependOn(&traffic_light_bench_install.step);
+    b.installArtifact(traffic_light_bench);
+
     // Create feature demo executable
     const feature_demo = b.addExecutable(.{
         .name = "feature_demo",
