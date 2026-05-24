@@ -57,6 +57,12 @@ fn exitInner(ctx: *hsm.Context, inst: *hsm.Instance, event: hsm.Event) void {
     h_inst.exit_count += 1;
 }
 
+fn internalEffect(ctx: *hsm.Context, inst: *hsm.Instance, event: hsm.Event) void {
+    _ = ctx;
+    _ = inst;
+    _ = event;
+}
+
 test "Hierarchical state transitions" {
     const model = comptime hsm.define("HierarchicalTest", .{
         hsm.initial(hsm.target("outer")),
@@ -185,7 +191,7 @@ test "Self transitions" {
             hsm.entry(enterOuter),
             hsm.exit(exitOuter),
             hsm.transition(.{ hsm.on("self"), hsm.target(".") }),
-            hsm.transition(.{ hsm.on("internal"), hsm.effect(enterInner) }) // Internal transition
+            hsm.transition(.{ hsm.on("internal"), hsm.effect(internalEffect) }) // Internal transition
         })
     });
     

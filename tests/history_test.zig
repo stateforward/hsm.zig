@@ -10,11 +10,11 @@ const TestInstance = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator) Self {
+    pub fn init(allocator: std.mem.Allocator) !Self {
         return Self{
             .base = hsm.Instance.init(),
             .allocator = allocator,
-            .log = std.ArrayList([]const u8).init(allocator),
+            .log = try std.ArrayList([]const u8).initCapacity(allocator, 0),
         };
     }
 
@@ -22,12 +22,12 @@ const TestInstance = struct {
         for (self.log.items) |msg| {
             self.allocator.free(msg);
         }
-        self.log.deinit();
+        self.log.deinit(self.allocator);
         self.base.deinit();
     }
 
     pub fn addLog(self: *Self, msg: []const u8) !void {
-        try self.log.append(try self.allocator.dupe(u8, msg));
+        try self.log.append(self.allocator, try self.allocator.dupe(u8, msg));
     }
 };
 
@@ -82,7 +82,7 @@ test "history state restoration" {
     });
 
     var context = hsm.Context.init(testing.allocator);
-    var instance = TestInstance.init(testing.allocator);
+    var instance = try TestInstance.init(testing.allocator);
     defer instance.deinit();
 
     // Build and start

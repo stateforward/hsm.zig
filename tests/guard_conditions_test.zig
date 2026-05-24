@@ -316,6 +316,9 @@ test "Guards in hierarchical states" {
 
     // Set flag and try to move
     try sm2.dispatch(&context, hsm.Event.init(testing.allocator, "set_flag"));
+    for (0..6) |_| {
+        try sm2.dispatch(&context, hsm.Event.init(testing.allocator, "increment"));
+    }
     try sm2.dispatch(&context, hsm.Event.init(testing.allocator, "move"));
     try testing.expect(std.mem.endsWith(u8, sm2.state(), "other_child"));
     try testing.expect(instance2.guard_calls.items.len == 1);
@@ -323,9 +326,6 @@ test "Guards in hierarchical states" {
     try testing.expect(instance2.guard_results.items[0] == true);
 
     // Test parent-level guard
-    for (0..6) |_| {
-        try sm2.dispatch(&context, hsm.Event.init(testing.allocator, "increment"));
-    }
     try sm2.dispatch(&context, hsm.Event.init(testing.allocator, "escape"));
     try testing.expect(std.mem.endsWith(u8, sm2.state(), "sibling"));
     try testing.expect(instance2.guard_calls.items.len == 2);

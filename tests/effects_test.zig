@@ -229,7 +229,7 @@ test "Effects with event data" {
     // Reset for second test
     var built_model2 = try model.build(testing.allocator);
     defer built_model2.deinit();
-    var instance2 = EffectsTestInstance.init(testing.allocator);
+    var instance2 = try EffectsTestInstance.init(testing.allocator);
     defer instance2.deinit();
     var sm2 = try hsm.start(&context, &instance2, &built_model2);
     defer sm2.deinit();
@@ -324,7 +324,7 @@ test "Effects with context cancellation" {
     defer built_model2.deinit();
     var context2 = hsm.Context.init(testing.allocator);
     context2.cancel(); // Cancel before effects
-    var instance2 = EffectsTestInstance.init(testing.allocator);
+    var instance2 = try EffectsTestInstance.init(testing.allocator);
     defer instance2.deinit();
     var sm2 = try hsm.start(&context2, &instance2, &built_model2);
     defer sm2.deinit();
@@ -504,7 +504,7 @@ test "Effects error handling and recovery" {
     // Reset for failure test
     var built_model2 = try model.build(testing.allocator);
     defer built_model2.deinit();
-    var instance2 = EffectsTestInstance.init(testing.allocator);
+    var instance2 = try EffectsTestInstance.init(testing.allocator);
     defer instance2.deinit();
     var sm2 = try hsm.start(&context, &instance2, &built_model2);
     defer sm2.deinit();
