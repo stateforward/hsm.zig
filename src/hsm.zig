@@ -132,11 +132,14 @@ pub fn isKind(kind: u64, comptime base_kinds: anytype) bool {
 pub const MakeKind = makeKind;
 pub const IsKind = isKind;
 pub const EventKind: u64 = 274;
+pub const CompletionEventKind: u64 = makeKind(EventKind);
+pub const ErrorEventKind: u64 = makeKind(CompletionEventKind);
 pub const CallEventKind: u64 = makeKind(.{ 25, EventKind });
 
 /// Event represents a state machine event with optional data
 pub const Event = struct {
     name: []const u8,
+    kind: u64,
     data: ?std.HashMap([]const u8, *anyopaque, std.hash_map.StringContext, std.hash_map.default_max_load_percentage),
     allocator: std.mem.Allocator,
 
@@ -145,6 +148,7 @@ pub const Event = struct {
     pub fn init(allocator: std.mem.Allocator, name: []const u8) Self {
         return Self{
             .name = name,
+            .kind = EventKind,
             .data = null,
             .allocator = allocator,
         };
@@ -153,9 +157,22 @@ pub const Event = struct {
     pub fn withData(allocator: std.mem.Allocator, name: []const u8) Self {
         return Self{
             .name = name,
+            .kind = EventKind,
             .data = std.HashMap([]const u8, *anyopaque, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).init(allocator),
             .allocator = allocator,
         };
+    }
+
+    pub fn completion(allocator: std.mem.Allocator, name: []const u8) Self {
+        var event = Self.init(allocator, name);
+        event.kind = CompletionEventKind;
+        return event;
+    }
+
+    pub fn errorEvent(allocator: std.mem.Allocator) Self {
+        var event = Self.withData(allocator, "__ERROR__");
+        event.kind = ErrorEventKind;
+        return event;
     }
 
     pub fn putData(self: *Self, key: []const u8, value: *anyopaque) !void {
@@ -2124,7 +2141,7 @@ pub const StateMachine = struct {
     }
 
     fn dispatchErrorEvent(self: *Self, ctx: *Context, err: anyerror, error_source: []const u8) !void {
-        var error_event = Event.withData(ctx.allocator, "__ERROR__");
+        var error_event = Event.errorEvent(ctx.allocator);
         defer error_event.deinit();
         try error_event.putData("error_type", @constCast(@as(*const anyopaque, @ptrCast(&err))));
         try error_event.putData("source", @constCast(@as(*const anyopaque, @ptrCast(&error_source))));
@@ -2170,14 +2187,30 @@ pub const StateMachine = struct {
     fn dispatchResult(self: *Self, ctx: *Context, event: Event) !DispatchStatus {
         if (self.stopped) return dispatch_status_processed;
 
+        if (isKind(event.kind, CompletionEventKind)) {
+            try self.processEvent(ctx, event);
+            return dispatch_status_processed;
+        }
+
         if (self.regular_queue) |queue| {
             queue.Push(ctx, event) catch |err| switch (err) {
-                error.QueueFull => return dispatch_status_queue_full,
-                else => return err,
+                error.QueueFull => {
+                    try self.dispatchErrorEvent(ctx, err, "queue_push");
+                    return dispatch_status_queue_full;
+                },
+                else => {
+                    try self.dispatchErrorEvent(ctx, err, "queue_push");
+                    return dispatch_status_processed;
+                },
             };
 
             var result = dispatch_status_processed;
-            while (try queue.Pop(ctx)) |queued_event| {
+            while (true) {
+                const maybe_queued_event = queue.Pop(ctx) catch |err| {
+                    try self.dispatchErrorEvent(ctx, err, "queue_pop");
+                    break;
+                };
+                const queued_event = maybe_queued_event orelse break;
                 const item_result = try self.processRegularEvent(ctx, queued_event);
                 if (item_result == dispatch_status_deferred) {
                     result = dispatch_status_deferred;
@@ -4052,6 +4085,32 @@ const RecordingQueue = struct {
     }
 };
 
+const FailingPushQueue = struct {
+    pushes: usize = 0,
+
+    const Self = @This();
+
+    fn push(context: ?*anyopaque, runtime_context: *Context, event: Event) anyerror!void {
+        _ = runtime_context;
+        _ = event;
+        const self: *Self = @ptrCast(@alignCast(context.?));
+        self.pushes += 1;
+        return error.QueuePushFailed;
+    }
+
+    fn pop(context: ?*anyopaque, runtime_context: *Context) anyerror!?Event {
+        _ = context;
+        _ = runtime_context;
+        return null;
+    }
+
+    fn len(context: ?*anyopaque, runtime_context: *Context) anyerror!usize {
+        _ = context;
+        _ = runtime_context;
+        return 0;
+    }
+};
+
 test "PascalCase DSL aliases compile" {
     const event_builder = On("start");
     try testing.expectEqualStrings("start", event_builder.event_name);
@@ -4260,6 +4319,72 @@ test "Config Queue Clock and completion dispatch APIs" {
     try testing.expectEqual(@as(usize, 1), recording.pushes);
     try testing.expect(recording.pops >= 1);
     try testing.expect(recording.lens >= 1);
+}
+
+test "custom queue hooks are regular-only and completion events stay runtime-owned" {
+    const model_type = comptime Define("CompletionQueueBypassModel", .{
+        Initial(Target("idle")),
+        State("idle", .{
+            Transition(.{ On("priority"), Target("../done") }),
+        }),
+        State("done", .{}),
+    });
+
+    var model = try model_type.build(testing.allocator);
+    defer model.deinit();
+
+    var ctx = Context.init(testing.allocator);
+    var inst = QueueTestInstance{};
+    var recording = try RecordingQueue.init(testing.allocator);
+    defer recording.deinit();
+
+    var queue = Queue(.{
+        .Context = @as(?*anyopaque, @ptrCast(&recording)),
+        .Push = RecordingQueue.push,
+        .Pop = RecordingQueue.pop,
+        .Len = RecordingQueue.len,
+    });
+
+    var sm = try StartWithConfig(&ctx, &inst.base, &model, Config(.{ .Queue = &queue }));
+    defer sm.deinit();
+
+    try sm.Dispatch(&ctx, Event.completion(testing.allocator, "priority"));
+
+    try testing.expectEqualStrings("/CompletionQueueBypassModel/done", sm.state());
+    try testing.expectEqual(@as(usize, 0), recording.pushes);
+    try testing.expectEqual(@as(usize, 0), recording.pops);
+}
+
+test "custom queue push errors propagate as runtime error events" {
+    const model_type = comptime Define("QueuePushErrorModel", .{
+        Initial(Target("idle")),
+        State("idle", .{
+            Transition(.{ On("__ERROR__"), Target("../failed") }),
+        }),
+        State("failed", .{}),
+    });
+
+    var model = try model_type.build(testing.allocator);
+    defer model.deinit();
+
+    var ctx = Context.init(testing.allocator);
+    var inst = QueueTestInstance{};
+    var failing = FailingPushQueue{};
+
+    var queue = Queue(.{
+        .Context = @as(?*anyopaque, @ptrCast(&failing)),
+        .Push = FailingPushQueue.push,
+        .Pop = FailingPushQueue.pop,
+        .Len = FailingPushQueue.len,
+    });
+
+    var sm = try StartWithConfig(&ctx, &inst.base, &model, Config(.{ .Queue = &queue }));
+    defer sm.deinit();
+
+    try sm.Dispatch(&ctx, Event.init(testing.allocator, "go"));
+
+    try testing.expectEqualStrings("/QueuePushErrorModel/failed", sm.state());
+    try testing.expectEqual(@as(usize, 1), failing.pushes);
 }
 
 test "Attribute Set emits OnSet transition and validates type" {
