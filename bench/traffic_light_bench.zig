@@ -132,23 +132,23 @@ fn validateTrafficLight(allocator: std.mem.Allocator, ctx: *hsm.Context, built_m
     defer inst.deinit();
     var sm = try hsm.start(ctx, &inst.base, built_model);
     defer sm.deinit();
-    assertTrafficLight(&sm, &inst, "/TrafficLight/operational/red", 0, 0, "initial");
+    assertTrafficLight(sm, &inst, "/TrafficLight/operational/red", 0, 0, "initial");
 
     try sm.dispatch(ctx, car_arrival);
-    assertTrafficLight(&sm, &inst, "/TrafficLight/operational/red", 1, 0, "after CarArrival");
+    assertTrafficLight(sm, &inst, "/TrafficLight/operational/red", 1, 0, "after CarArrival");
 
     try sm.dispatch(ctx, timer_event);
-    assertTrafficLight(&sm, &inst, "/TrafficLight/operational/green", 1, 40, "after first TimerEvent");
+    assertTrafficLight(sm, &inst, "/TrafficLight/operational/green", 1, 40, "after first TimerEvent");
 
     try sm.dispatch(ctx, timer_event);
-    assertTrafficLight(&sm, &inst, "/TrafficLight/operational/yellow", 1, 40, "after second TimerEvent");
+    assertTrafficLight(sm, &inst, "/TrafficLight/operational/yellow", 1, 40, "after second TimerEvent");
 
     try sm.dispatch(ctx, timer_event);
-    assertTrafficLight(&sm, &inst, "/TrafficLight/operational/red", 1, 40, "after third TimerEvent");
+    assertTrafficLight(sm, &inst, "/TrafficLight/operational/red", 1, 40, "after third TimerEvent");
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.GeneralPurposeAllocator(.{ .enable_memory_limit = true }){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -198,7 +198,7 @@ pub fn main() !void {
     var batch_cycles: usize = 1;
     while (true) {
         const calibration_start = std.time.milliTimestamp();
-        try dispatchBatch(&warmup_sm, &ctx, batch_cycles, car_arrival, timer_event);
+        try dispatchBatch(warmup_sm, &ctx, batch_cycles, car_arrival, timer_event);
         if ((std.time.milliTimestamp() - calibration_start) >= 10 or batch_cycles >= (1 << 20)) {
             break;
         }
@@ -206,7 +206,7 @@ pub fn main() !void {
     }
     const warmup_start = std.time.milliTimestamp();
     while ((std.time.milliTimestamp() - warmup_start) < warmup_ms) {
-        try dispatchBatch(&warmup_sm, &ctx, batch_cycles, car_arrival, timer_event);
+        try dispatchBatch(warmup_sm, &ctx, batch_cycles, car_arrival, timer_event);
     }
     warmup_sm.deinit();
     warmup_inst.deinit();
@@ -220,7 +220,7 @@ pub fn main() !void {
 
     var completed_cycles: usize = 0;
     while ((std.time.milliTimestamp() - start_time) < duration_target_ms) {
-        try dispatchBatch(&sm, &ctx, batch_cycles, car_arrival, timer_event);
+        try dispatchBatch(sm, &ctx, batch_cycles, car_arrival, timer_event);
         completed_cycles += batch_cycles;
     }
 
@@ -233,9 +233,7 @@ pub fn main() !void {
         ops_per_sec = @intCast((total_dispatches * 1000) / @as(usize, @intCast(duration_ms)));
     }
 
-    // Fallback: estimate memory used by allocator since getrusage requires cImport and linkage.
-    // For a generic comparison, heap usage of GPA is an okay proxy for Zig.
-    const mem_mb: f64 = 0.0;
+    const mem_mb: f64 = @as(f64, @floatFromInt(gpa.total_requested_bytes)) / (1024.0 * 1024.0);
 
     std.debug.print("{{\"language\": \"Zig\", \"iterations\": {}, \"duration_ms\": {}, \"memory_mb\": {d:.3}, \"throughput_ops_per_sec\": {}}}\n", .{ total_dispatches, duration_ms, mem_mb, ops_per_sec });
 }

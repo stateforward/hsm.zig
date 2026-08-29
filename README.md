@@ -1,285 +1,170 @@
-# HSM (Hierarchical State Machine) for Zig
+# hsm.zig
 
-A simplified state machine framework for Zig that provides basic state machines with entry/exit actions, guard conditions, effect actions, and activities.
+`hsm.zig` is the active StateForward hierarchical state-machine package for
+Zig. Models are declared at compile time and built into flat runtime storage
+indexed by qualified state names, with transition paths prepared during model
+construction.
 
-**Note**: This is a simplified implementation that demonstrates the core HSM concepts. The full compile-time hierarchical implementation is available in `src/hsm.zig` but requires additional work for Zig compatibility.
+Release: `v1.3.3`.
 
-## Features
+## API
 
-- **Compile-time Model Definition**: State machines are built at compile time for zero runtime cost
-- **Hierarchical States**: Support for nested states with proper entry/exit semantics
-- **Multiple Action Support**: Entry, exit, effect, and activity functions with multiple function support
-- **Guard Conditions**: Boolean conditions to control transitions
-- **Choice States**: Conditional branching with required guardless fallback
-- **Path Resolution**: Relative and absolute path navigation (`../`, `./`, `/absolute/path`)
-- **Activity Support**: Long-running async operations with cancellation
-- **Timer Transitions**: `after` and `every` timer-based transitions
-- **Compile-time Validation**: Extensive validation catches errors at compile time
-- **Memory Safe**: Proper memory management with explicit allocator patterns
-
-## Quick Start
+The package has no external dependencies. A minimal model and runtime setup
+looks like this:
 
 ```zig
 const std = @import("std");
 const hsm = @import("hsm");
 
-// Define your instance type
-const MyInstance = struct {
-    base: hsm.Instance,
-    counter: i32,
-    
-    pub fn init(allocator: std.mem.Allocator) @This() {
-        return .{
-            .base = hsm.Instance.init(allocator),
-            .counter = 0,
-        };
-    }
-    
-    pub fn deinit(self: *@This()) void {
-        self.base.deinit();
-    }
-};
-
-// Define action functions (all use (ctx, inst, event) signature)
-fn incrementCounter(ctx: *hsm.Context, inst: *hsm.Instance, event: hsm.Event) void {
-    _ = ctx; _ = event;
-    const my_inst: *MyInstance = @ptrCast(@alignCast(inst));
-    my_inst.counter += 1;
-}
-
-fn checkCounter(ctx: *hsm.Context, inst: *hsm.Instance, event: hsm.Event) bool {
-    _ = ctx; _ = event;
-    const my_inst: *MyInstance = @ptrCast(@alignCast(inst));
-    return my_inst.counter >= 5;
-}
-
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    
-    // Define state machine at compile time
-    const model = comptime hsm.define("CounterMachine", .{
-        hsm.initial(hsm.target("counting")),
-        
-        hsm.state("counting", .{
-            hsm.entry(resetCounter),
-            hsm.transition(.{ hsm.on("increment"), hsm.effect(incrementCounter) }),
-            hsm.transition(.{ hsm.on("check"), hsm.guard(checkCounter), hsm.target("done") })
-        }),
-        
-        hsm.final("done")
-    });
-    
-    // Validate at compile time
-    hsm.validate(model);
-    
-    // Create context and instance
-    var context = hsm.Context.init(allocator);
-    var instance = MyInstance.init(allocator);
-    defer instance.deinit();
-    
-    // Start the state machine
-    var sm = try hsm.start(&context, &instance, &model);
-    defer sm.deinit();
-    
-    // Dispatch events
-    try sm.dispatch(&context, hsm.Event.init("increment"));
-    try sm.dispatch(&context, hsm.Event.init("check"));
-}
-```
-
-## Core Concepts
-
-### Function Signatures
-
-All HSM functions follow the same signature pattern:
-
-```zig
-fn myAction(ctx: *hsm.Context, inst: *hsm.Instance, event: hsm.Event) void {}
-fn myGuard(ctx: *hsm.Context, inst: *hsm.Instance, event: hsm.Event) bool {}
-fn myActivity(ctx: *hsm.Context, inst: *hsm.Instance, event: hsm.Event) void {} // Async
-fn myTimer(ctx: *hsm.Context, inst: *hsm.Instance, event: hsm.Event) u64 {} // Returns nanoseconds
-```
-
-### Multiple Functions
-
-All action types support multiple functions executed in sequence:
-
-```zig
-hsm.entry(.{ setupState, logEntry, initializeCounters })
-hsm.exit(.{ saveData, cleanup, logExit })
-hsm.effect(.{ validate, process, update })
-hsm.activity(.{ backgroundSync, heartbeat, monitoring }) // Run concurrently
-```
-
-### State Types
-
-```zig
-// Regular state with full functionality
-hsm.state("processing", .{
-    hsm.entry(processingEntry),
-    hsm.exit(processingExit),
-    hsm.activity(backgroundWork),
-    hsm.transition(.{ hsm.on("complete"), hsm.target("done") })
-})
-
-// Final state - no transitions, activities, or substates allowed
-hsm.final("completed")
-
-// Choice state - must have guardless fallback
-hsm.choice("decision", .{
-    hsm.transition(.{ hsm.guard(condition1), hsm.target("path1") }),
-    hsm.transition(.{ hsm.guard(condition2), hsm.target("path2") }),
-    hsm.transition(.{ hsm.target("default") }) // Required guardless fallback
-})
-```
-
-### Path Resolution
-
-```zig
-hsm.target("child")           // Direct child of current state
-hsm.target("../sibling")      // Up one level to sibling
-hsm.target("/root/absolute")  // Absolute path from machine root
-hsm.target(".")               // Self transition (exit and re-enter)
-hsm.target("..")              // Parent reference
-```
-
-### Hierarchical States
-
-```zig
-hsm.state("parent", .{
-    hsm.initial(hsm.target("child1")),
-    
-    hsm.state("child1", .{
-        hsm.transition(.{ hsm.on("next"), hsm.target("../child2") })
+const Controller = comptime hsm.define("Controller", .{
+    hsm.initial(hsm.target("ready")),
+    hsm.state("ready", .{
+        hsm.transition(.{ hsm.on("stop"), hsm.target("stopped") }),
     }),
-    
-hsm.state("child2", .{
-        hsm.transition(.{ hsm.on("up"), hsm.target("../../other") })
-    })
+    hsm.final("stopped"),
+});
+
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+defer _ = gpa.deinit();
+const allocator = gpa.allocator();
+
+var model = try Controller.build(allocator);
+defer model.deinit();
+try hsm.validate(&model);
+
+var context = hsm.Context.init(allocator);
+var instance = hsm.Instance.init();
+defer instance.deinit();
+var machine = try hsm.start(&context, &instance, &model);
+defer machine.deinit();
+try machine.dispatch(&context, hsm.Event.init(allocator, "stop"));
+```
+
+`Instance.init()` takes no allocator. The builder API includes `define`,
+`redefine`, `state`, `final`, `choice`, `initial`, `transition`, `on`, `onSet`,
+`onCall`, `target`, `entry`, `exit`, `effect`, `activity`, `guard`, `after`,
+`every`, `at`, `deferEvents`, `validator`, `finalizer`, and `observe`; transition
+subtypes can be selected with `TransitionType(InternalKind)`,
+`TransitionType(ExternalKind)`, `TransitionType(LocalKind)`, or
+`TransitionType(SelfKind)`. PascalCase aliases are also exported. `New` binds
+an unstarted runtime and `.start()`
+enters its initial configuration; `Started` combines both operations. All
+constructors return the owning `*StateMachine` handle, so callers deinitialize
+that pointer directly exactly once. Copying the pointer creates a borrow, not a
+second owner; borrowed aliases must not call `deinit()` after the owning handle
+has been released. Zig uses
+tuples where the shared DSL uses variadic arguments, for example
+`Observe(callback, .{"*"})`. Initial declarations support a target alone or a
+target followed by ordered effects:
+
+Only started machines are visible through the context registry. `stop()` removes
+the machine from that registry, and a later `start()` registers it again.
+
+```zig
+hsm.initial(hsm.target("ready"))
+hsm.initial(.{
+    hsm.target("ready"),
+    hsm.effect(.{ initialize, record_start }),
 })
 ```
 
-### History States
+Initial entry uses the canonical runtime event `hsm/initial`; construct one
+directly with the public `hsm.InitialEvent(allocator)` helper. The matching
+`hsm.FinalEvent(allocator)` and `hsm.ErrorEvent(allocator)` helpers create the
+shared `hsm/final` and `hsm/error` completion events. Use `TimerEvent(allocator,
+name)` for a manually injected timer event; ordinary `Event` values do not
+activate timer transitions.
 
-Supports both Shallow (H) and Deep (H*) history pseudo-states to restore previous state configurations.
+`Event.putData` and `Event.putMetadata` store borrowed `*anyopaque` values. The
+runtime copies event envelopes into re-entrant, regular, deferred, and activity
+queues but does not deep-copy or destroy arbitrary borrowed payloads, so that
+storage must remain valid until processing completes. Runtime-generated typed
+payloads such as `AttributeChange` and `CallData` are retained across queued
+and deferred delivery; `CallData.ArgsAs(T)` and `CallData.ValueAs(index, T)`
+provide typed pointer views. `CallWithArgs` accepts an ordered tuple of borrowed
+pointers for multi-argument operation calls. Use `putOwnedData` or
+`putOwnedMetadata` with a `PayloadDropFn` when the event should own an arbitrary
+payload through queued delivery.
 
-```zig
-// Composite state with history
-hsm.state("connection", .{
-    // Shallow history: remembers direct child of "connection"
-    hsm.history("H", hsm.target("disconnected")),
-    
-    hsm.state("disconnected", .{ ... }),
-    hsm.state("connected", .{ ... })
-})
+`fromContextLease` and `instancesFromContextLease` provide lifetime-safe context
+lookups. `Group.Snapshots()` returns one caller-owned snapshot per member;
+`Group.TakeSnapshot()` remains the aggregate snapshot API.
 
-// Deep history: remembers recursively
-hsm.state("complex", .{
-    hsm.deepHistory("H*", hsm.target("default")),
-    ...
-})
-```
+`Context.initWithParent` borrows its parent; the parent must outlive every
+child query. A custom `RuntimeQueue` receives owned event clones: successful
+`Push` transfers ownership, failed `Push` must retain nothing, and `Pop`
+transfers ownership to its caller. A failed `Pop` is an atomic no-transfer
+operation and may be retried once; a failed `Len` has no mutation or ownership
+effect. Queue and clock callback contexts are
+borrowed, must outlive the machine, and must synchronize themselves when shared
+across machines or timer/activity threads. Stop drains events that were
+successfully accepted by the queue. If `Pop` continues to fail after the
+bounded retry, stop returns the second Pop error with those events still owned
+by the custom queue; the queue owner must make them drainable before retrying
+stop/deinit. The failed attempt leaves the active configuration intact, so
+exit actions are not repeated on the retry; restart also retries stop before
+re-entering the model.
 
-### Activities and Cancellation
+The context passed to `start` is the machine's lifetime context and must outlive
+the machine. Timer workers retain that machine context rather than an
+event-local context supplied to a transition.
 
-```zig
-fn longRunningActivity(ctx: *hsm.Context, inst: *hsm.Instance, event: hsm.Event) void {
-    while (!ctx.is_done()) {
-        // Do work in chunks
-        performWork();
-        
-        // Check cancellation periodically
-        std.time.sleep(std.time.ns_per_ms * 100);
-        if (ctx.is_done()) break;
-    }
-}
-```
+Activities run concurrently and receive the shared instance pointer. Activity
+code must treat that pointer as actor-owned state: coordinate any mutation
+with the application, honor context cancellation, and do not retain the
+pointer or event after the callback returns. The runtime cancels admitted
+activities before state-exit teardown and waits for them to return, except when
+the callback synchronously stops its own machine. `RuntimeConfig.ActivityTimeoutNs`
+sets the finite wait bound (the default is five seconds); a non-cooperative
+callback causes `stop()` to return `error.ActivityTimeout` while the owner
+remains alive for a later retry. `deinit()` is a `void` API: it logs the same
+timeout and leaves the owner alive, so callers must retry deinitialization
+after the callback finishes.
 
-### Timer Functions
+`SubmachineState(name, child_model)` flattens a reusable child model under a
+boundary. For boundary-local entry/exit/activity/defer/transition behavior,
+use the Zig-specific `SubmachineStateWithPartials(name, child_model, .{ ... })`
+helper. The two-argument form remains source-compatible.
 
-```zig
-fn shortDelay(ctx: *hsm.Context, inst: *hsm.Instance, event: hsm.Event) u64 {
-    _ = ctx; _ = inst; _ = event;
-    return std.time.ns_per_ms * 500; // 500 milliseconds
-}
+The compatibility `fromContext`, `instancesFromContext`, and `Group.Instances()`
+forms return borrowed pointers. Do not retain those aliases across `stop()` or
+`deinit()`; use the lease forms when a lookup must outlive the lookup call.
 
-// Usage
-hsm.transition(.{ hsm.after(shortDelay), hsm.target("timeout_state") })
-hsm.transition(.{ hsm.every(shortDelay), hsm.effect(periodicAction) })
-```
+History builders accept the legacy `target(...)` default and native default
+transition tuples, for example `history("h", .{ transition(.{ guard(fn),
+effect(fn), target("ready") }) })`; default guards and effects retain their
+declaration order.
 
-## Building and Testing
+The package exports the canonical inherited kind constants (`ElementKind`,
+`StateKind`, `TransitionKind`, event kinds, pseudostate kinds, and the other
+`*Kind` values). `ElementType` is the separate native enum used for flat-storage
+structural tags such as `.state`, `.final`, and `.choice`.
 
-```bash
-# Build the library
+## Build and validation
+
+This package targets Zig 0.15.2 exactly. Verify the toolchain before building;
+the guard prevents a newer incompatible Zig release from being used:
+
+```sh
+test "$(zig version)" = "0.15.2"
 zig build
-
-# Run tests
 zig build test
-
-# Run the basic example
-zig build example
 ```
 
-## Directory Structure
+Compile the validation test directly for the macOS target-15 surface with:
 
-```
-zig/
-├── build.zig              # Build configuration
-├── build.zig.zon          # Package manifest
-├── src/
-│   └── hsm.zig            # Main HSM implementation
-├── examples/
-│   └── basic.zig          # Basic usage example
-├── tests/
-│   ├── basic_test.zig     # Basic functionality tests
-│   ├── hierarchical_test.zig # Hierarchical state tests
-│   └── choice_test.zig    # Choice state tests
-└── README.md              # This file
+```sh
+test "$(zig version)" = "0.15.2"
+zig test -target aarch64-macos.15.0 \
+    --dep hsm -Mroot=tests/validation_test.zig -Mhsm=src/hsm.zig \
+    -fno-emit-bin
 ```
 
-## Best Practices
-
-### Performance
-- Use `comptime` for model definition when possible
-- Prefer stack allocation over heap when feasible
-- Keep guard functions lightweight and deterministic
-- Check `ctx.is_done()` in long-running activities
-
-### Memory Safety
-- Always pair `init()` with `deinit()`
-- Use arena allocators for temporary state machines
-- Pass allocators explicitly through instance structs
-- Check for null before accessing optional data
-
-### State Machine Design
-- Use absolute paths when unsure about relative paths
-- Keep guard functions fast and side-effect free
-- Put long-running work in activities only
-- Handle all error cases with explicit error states
-- Use specific, domain-relevant event names
-- Avoid deep hierarchies (>4 levels recommended)
-
-## Critical Rules
-
-### MUST Do
-- **Context first**: `(ctx, inst, event)` signature in ALL functions
-- **Event objects only**: Use `hsm.Event.init()` or `hsm.Event.withData()`
-- **Sync functions**: entry/exit/effect/guard - NO spawning threads
-- **Async functions**: activities only - for long-running cancellable tasks
-- **Memory management**: Always pair init/deinit calls
-- **Cancellation**: Check `ctx.is_done()` in activities
-
-### MUST NOT Do
-- Spawn threads in sync functions (entry/exit/effect/guard)
-- Ignore context cancellation in activities
-- Use string events - only Event objects
-- Forget to call deinit() on instances
-- Create choice states without guardless fallback
-- Access freed memory after instance.deinit()
-
-## License
-
-This implementation follows the same license as the parent HSM project.
+This target-15 command is compile validation; running the resulting binary
+requires a matching target runtime. `conformance/run_case.zig` covers the
+canonical JSON surface, including nested states, connection points, generated
+attribute events, operations, completion transitions, activities, snapshots,
+configured queues, per-instance models and clocks, deferred replay, and bounded
+reentrancy. `conformance/run_all.py` provides the reproducible aggregate; the
+current exact corpus result is 1396 passes, zero skips, zero failures, and zero
+crashes in both Debug and `ReleaseFast`.

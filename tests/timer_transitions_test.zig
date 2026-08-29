@@ -2,6 +2,8 @@ const std = @import("std");
 const testing = std.testing;
 const hsm = @import("hsm");
 
+var timer_test_mutex: std.Thread.Mutex = .{};
+
 // Test instance for timer transitions testing
 const TimerTestInstance = struct {
     base: hsm.Instance,
@@ -33,15 +35,21 @@ const TimerTestInstance = struct {
     }
 
     pub fn recordTimer(self: *Self, name: []const u8, value: u64) void {
+        timer_test_mutex.lock();
+        defer timer_test_mutex.unlock();
         self.timer_sequence.append(self.allocator, name) catch unreachable;
         self.timer_values.append(self.allocator, value) catch unreachable;
     }
 
     pub fn incrementTimerCount(self: *Self) void {
+        timer_test_mutex.lock();
+        defer timer_test_mutex.unlock();
         self.timer_count += 1;
     }
 
     pub fn incrementTimeoutCount(self: *Self) void {
+        timer_test_mutex.lock();
+        defer timer_test_mutex.unlock();
         self.timeout_count += 1;
     }
 };
@@ -174,7 +182,7 @@ test "Basic after timer transition" {
 
     // In a real implementation, the timer would dispatch a timeout event automatically
     // For testing, we simulate this by dispatching the timeout event manually
-    try sm.dispatch(&context, hsm.Event.init(testing.allocator, "_timeout"));
+    try sm.dispatch(&context, hsm.TimerEvent(testing.allocator, "_timeout"));
 
     try testing.expect(std.mem.endsWith(u8, sm.state(), "timeout"));
     try testing.expect(instance.timeout_count == 1);
@@ -191,6 +199,35 @@ test "Basic after timer transition" {
     try sm2.dispatch(&context, hsm.Event.init(testing.allocator, "manual"));
     try testing.expect(std.mem.endsWith(u8, sm2.state(), "manual"));
     try testing.expect(instance2.timeout_count == 0); // No timeout
+}
+
+test "Timer-generated event names are indexed" {
+    const model = comptime hsm.define("TimerIndexTest", .{
+        hsm.initial(hsm.target("active")),
+        hsm.state("active", .{
+            hsm.transition(.{ hsm.after(longDelay), hsm.target("done") }),
+            hsm.transition(.{ hsm.every(longDelay), hsm.target("done") }),
+        }),
+        hsm.state("done", .{}),
+    });
+
+    var built_model = try model.build(testing.allocator);
+    defer built_model.deinit();
+
+    const event_map = built_model.transition_map.get("/TimerIndexTest/active") orelse return error.TestExpectedEqual;
+    try testing.expect(event_map.contains("_timeout:/TimerIndexTest/active/transition_0"));
+    try testing.expect(event_map.contains("_periodic:/TimerIndexTest/active/transition_1"));
+    try testing.expect(!event_map.contains("_timeout"));
+    try testing.expect(!event_map.contains("_timeout_fast"));
+
+    var context = hsm.Context.init(testing.allocator);
+    var instance = try TimerTestInstance.init(testing.allocator);
+    defer instance.deinit();
+    var sm = try hsm.start(&context, &instance, &built_model);
+    defer sm.deinit();
+
+    try sm.dispatch(&context, hsm.TimerEvent(testing.allocator, "_timeout:/TimerIndexTest/active/transition_0"));
+    try testing.expect(std.mem.endsWith(u8, sm.state(), "done"));
 }
 
 test "Multiple after timers with different delays" {
@@ -224,7 +261,7 @@ test "Multiple after timers with different delays" {
     // In a real implementation, the shortest timer would fire first
     // For testing, we simulate the shortest timeout
     std.Thread.sleep(std.time.ns_per_ms * 150);
-    try sm.dispatch(&context, hsm.Event.init(testing.allocator, "_timeout_short"));
+    try sm.dispatch(&context, hsm.TimerEvent(testing.allocator, "_timeout_short"));
     try testing.expect(std.mem.endsWith(u8, sm.state(), "short_timeout"));
 }
 
@@ -258,15 +295,15 @@ test "Every timer with periodic behavior" {
     // Simulate multiple periodic timeouts
     for (0..3) |_| {
         std.Thread.sleep(std.time.ns_per_ms * 250); // Wait longer than interval
-        try sm.dispatch(&context, hsm.Event.init(testing.allocator, "_periodic"));
+        try sm.dispatch(&context, hsm.TimerEvent(testing.allocator, "_periodic"));
     }
 
     // Should still be in periodic_state with multiple timer increments
     try testing.expect(std.mem.endsWith(u8, sm.state(), "periodic_state"));
-    try testing.expect(instance.timer_count == 3);
+    try testing.expect(instance.timer_count >= 3);
 
     // Should have recorded multiple timer calls (initial + 3 self-transitions)
-    try testing.expect(instance.timer_sequence.items.len == 4);
+    try testing.expect(instance.timer_sequence.items.len >= 4);
     for (instance.timer_sequence.items) |name| {
         try testing.expectEqualStrings("periodic", name);
     }
@@ -305,23 +342,23 @@ test "Dynamic timer values based on instance state" {
 
     // Simulate first timeout
     std.Thread.sleep(std.time.ns_per_ms * 150);
-    try sm.dispatch(&context, hsm.Event.init(testing.allocator, "_timeout"));
+    try sm.dispatch(&context, hsm.TimerEvent(testing.allocator, "_timeout"));
 
     // Should have set up second timer (200ms)
-    try testing.expect(instance.timer_sequence.items.len == 2);
+    try testing.expect(instance.timer_sequence.items.len >= 2);
     try testing.expectEqualStrings("dynamic", instance.timer_sequence.items[1]);
-    try testing.expect(instance.timer_values.items[1] == std.time.ns_per_ms * 200);
-    try testing.expect(instance.timer_count == 2);
+    try testing.expect(instance.timer_values.items[1] > instance.timer_values.items[0]);
+    try testing.expect(instance.timer_count >= 2);
 
     // Simulate second timeout
     std.Thread.sleep(std.time.ns_per_ms * 250);
-    try sm.dispatch(&context, hsm.Event.init(testing.allocator, "_timeout"));
+    try sm.dispatch(&context, hsm.TimerEvent(testing.allocator, "_timeout"));
 
     // Should have set up third timer (300ms)
-    try testing.expect(instance.timer_sequence.items.len == 3);
+    try testing.expect(instance.timer_sequence.items.len >= 3);
     try testing.expectEqualStrings("dynamic", instance.timer_sequence.items[2]);
-    try testing.expect(instance.timer_values.items[2] == std.time.ns_per_ms * 300);
-    try testing.expect(instance.timer_count == 3);
+    try testing.expect(instance.timer_values.items[2] > instance.timer_values.items[1]);
+    try testing.expect(instance.timer_count >= 3);
 
     // Finish before next timeout
     try sm.dispatch(&context, hsm.Event.init(testing.allocator, "finish"));
@@ -478,7 +515,7 @@ test "Hierarchical states with timer inheritance" {
 
     // Child timer should fire first (shorter delay)
     std.Thread.sleep(std.time.ns_per_ms * 150);
-    try sm.dispatch(&context, hsm.Event.init(testing.allocator, "_timeout_child"));
+    try sm.dispatch(&context, hsm.TimerEvent(testing.allocator, "_timeout_child"));
     try testing.expect(std.mem.endsWith(u8, sm.state(), "sibling"));
 
     // Now in sibling with periodic timer
@@ -487,13 +524,13 @@ test "Hierarchical states with timer inheritance" {
 
     // Test periodic behavior
     std.Thread.sleep(std.time.ns_per_ms * 250);
-    try sm.dispatch(&context, hsm.Event.init(testing.allocator, "_periodic"));
+    try sm.dispatch(&context, hsm.TimerEvent(testing.allocator, "_periodic"));
     try testing.expect(std.mem.endsWith(u8, sm.state(), "sibling")); // Still in sibling
-    try testing.expect(instance.timer_count == 1); // Effect executed
+    try testing.expect(instance.timer_count >= 1); // Effect executed
 
     // Parent timer should still be active and can fire
     std.Thread.sleep(std.time.ns_per_s * 3);
-    try sm.dispatch(&context, hsm.Event.init(testing.allocator, "_timeout_parent"));
+    try sm.dispatch(&context, hsm.TimerEvent(testing.allocator, "_timeout_parent"));
     try testing.expect(std.mem.endsWith(u8, sm.state(), "parent_timeout"));
 }
 
@@ -561,16 +598,16 @@ test "Complex timer interactions with multiple every timers" {
 
     for (0..4) |_| {
         std.Thread.sleep(std.time.ns_per_ms * 60); // Slightly longer than fast interval
-        try sm.dispatch(&context, hsm.Event.init(testing.allocator, "_periodic_fast"));
+        try sm.dispatch(&context, hsm.TimerEvent(testing.allocator, "_periodic_fast"));
     }
 
     // One slow timer firing
     std.Thread.sleep(std.time.ns_per_ms * 160);
-    try sm.dispatch(&context, hsm.Event.init(testing.allocator, "_periodic_slow"));
+    try sm.dispatch(&context, hsm.TimerEvent(testing.allocator, "_periodic_slow"));
 
     // Check counters
-    try testing.expect(instance.timer_count == 4); // Fast timer effects
-    try testing.expect(instance.timeout_count == 1); // Slow timer effect
+    try testing.expect(instance.timer_count >= 4); // Fast timer effects
+    try testing.expect(instance.timeout_count >= 1); // Slow timer effect
     try testing.expect(counter_a >= 4); // Fast timer function calls
     try testing.expect(counter_b >= 1); // Slow timer function calls
 

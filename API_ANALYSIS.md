@@ -69,14 +69,15 @@ const model = hsm.define("MachineName", .{
 });
 ```
 
-### 2. Compile-Time Model Building
-The Zig implementation builds models at compile time:
+### 2. Compile-Time Model Description, Runtime Index Build
+The Zig implementation captures model declarations at compile time and builds
+the runtime model and lookup indexes when `build()` is called:
 ```zig
 // Compile-time builder that returns a type with build() method
 pub fn define(comptime name: []const u8, comptime elements: anytype) type {
     return struct {
         pub fn build(allocator: std.mem.Allocator) !Model {
-            // Build model at runtime from compile-time description
+            // Build the runtime model from the compile-time description
         }
     };
 }
@@ -118,19 +119,103 @@ pub fn entry(comptime funcs: anytype) EntryBuilder(Instance) {
 3. **Transition Building**: Transitions can be composed with multiple builders
 4. **Function Signatures**: All functions use `(ctx, inst, event)` pattern
 5. **Compile-time Processing**: Models are processed at compile time
-6. **Basic Demo**: Working example showing runtime API usage
+6. **Runtime parity slice**: timers, choices, deferred events, activities,
+   hierarchy, history, connection points, attributes, operations, snapshots,
+   queues, per-instance models/clocks, and bounded reentrancy are covered by
+   the canonical conformance runner and package tests
+7. **Version and build surface**: `v1.3.3`, Zig 0.15.2, target-15 compile
+   checks, and the examples/benchmarks are aligned
+8. **Declarative extension slice**: `Redefine`, `Validator`, `Finalizer`, and
+   `Observe` are native compile-time builders. Zig adapts variadic DSL forms
+   to tuples; model hooks accept callbacks and observation accepts callback plus
+   a tuple of target patterns.
+9. **Event-kind parity slice**: change, call, and timer events expose dedicated
+   inherited kind identifiers, snapshots preserve the change/call/time tags,
+   and manually injected timer events use the low-ceremony `TimerEvent` helper.
+10. **Initial declaration/effects slice**: `initial(target(...))` and
+    `initial(.{ target(...), effect(...), ... })` are native declarations.
+    Initial effects execute in declaration order, startup and lifecycle
+    re-entry use the canonical runtime event `hsm/initial`, and the public
+    `hsm.InitialEvent`, `hsm.FinalEvent`, and `hsm.ErrorEvent` helpers create
+    the shared runtime completion events directly.
+11. **Transition topology validation**: `validate()` rejects non-initial
+    transitions that have neither a target nor an effect, including guard-only
+    and event-only transitions, while preserving effect-only internal
+    transitions. The conformance runner maps this native error to the
+    canonical `missing_target` validation code.
+12. **Transition subtype and ownership APIs**: transition subtype markers and
+    inferred kinds preserve internal, external, local, and self semantics;
+    context leases hold a live machine through lookup; and `Group.Snapshots()`
+    returns ordered per-member snapshots alongside the aggregate API.
+13. **History default transitions**: shallow and deep history builders accept
+    native default transition partials with ordered guards and effects, while
+    preserving the legacy target-only form.
+14. **Submachine model-member flattening**: composed child attributes and
+    operations are redefined into the parent model namespace alongside the
+    child state/transition topology; completion selection is scoped to the
+    immediately completing composite.
 
-### 🚧 In Progress
-1. **Compile-time API**: The `define()` function compiles but needs debugging for proper state transitions
-2. **Memory Management**: Current implementation has memory leaks that need cleanup
-3. **Initial Transitions**: Need to properly set up initial state transitions
-
-### ❌ Not Yet Implemented
-1. **Timer Functions**: `after()` and `every()` timer-based transitions
-2. **Choice States**: Dynamic branching based on guard conditions  
-3. **Deferred Events**: Event deferral mechanism
-4. **Activities**: Proper concurrent activity execution
-5. **Advanced Features**: Error handling, validation, hierarchical states
+### Explicit residuals
+The canonical JSON/runtime surface is green, but native-runtime boundaries
+remain intentionally explicit. `Observe` now instruments entry, exit, activity,
+effect, operations, guards, timers, and matching transition events through
+direct compile-time wrappers. Observation envelopes expose the qualified
+behavior/transition source while `ObservationData.event` remains the original
+event passed to the wrapped callback. `Redefine` implements same-category named overlays
+for vertex-like states (`State`, `Final`, `Choice`, `History`, and
+`Submachine`), attributes, operations, and connection points; it also replaces
+an inherited root `Initial` when additions provide a replacement. Source-owned
+transition-subtree removal is implemented for inherited transitions whose explicit
+source or target paths touch a replaced vertex subtree. Composite `State` overlays
+recursively merge nested additions, so a child replacement keeps unrelated
+siblings while final, history, choice, and submachine replacements remain full
+subtree replacements. Initial declaration/effects and the canonical initial event
+are implemented; they are not residual parity work. Transition topology validation
+is implemented. Runtime constructors now return the pointer to the embedded
+`RuntimeOwner.machine`, keeping the owner allocation and its deinit lifecycle
+tied to the public handle. The returned pointer is the single owning handle;
+pointer copies are borrows and callers must invoke `deinit()` exactly once on
+the owner. Finalizers support
+`void`/`!void` and `*Model`/`!*Model` only when a returned pointer is the
+in-place model; normal `Model.build` runs default validation and finalization,
+while explicit hooks override those defaults by the last marker. Custom
+    finalizers run before the default index finalizer and are responsible for any
+    required preparation. Arbitrary opaque event data passed through putData remains
+    intentionally borrowed and is not deep-copied; putOwnedData and putOwnedMetadata
+    provide an explicit drop-callback ownership path through queued or deferred
+    delivery. Timer/activity teardown, lifecycle serialization, transition
+    subtypes, multi-argument CallData, context lookup leases, and per-member group snapshots are implemented
+    and covered by the current test matrix. Native history defaults accept ordered
+    guarded/effectful transition partials and preserve the target-only form; unsupported
+    history triggers/source/timers are rejected at compile time. Strict end-to-end O(1) proof remains a
+    residual because exit/entry/effect execution is proportional to the affected
+    configuration. The compatibility `fromContext`, `instancesFromContext`, and
+    `Group.Instances()` APIs return borrowed pointers/slices and do not pin lifetime;
+    callers requiring a retained lookup must use the lease APIs. Stop preflights
+    its bookkeeping allocations before teardown, but a user callback or future
+    internal teardown error is not advertised as a transactional rollback boundary.
+    `RuntimeQueue` now documents clone ownership, atomic failed-Push behavior,
+    Pop transfer, borrowed callback contexts, and the stop drain boundary;
+    `Context.initWithParent` explicitly documents its borrowed-parent lifetime.
+    Persistent custom-queue Pop failure is bounded to two drain attempts and
+    explicitly returns the second Pop error before state teardown and leaves
+    not-yet-returned events owned by that queue for a later retry. A failed
+    drain leaves the active configuration intact; restart retries stop before
+    re-entry. Snapshot construction now cleans identity/state/event/transition/
+    attribute allocations when RuntimeQueue.Len fails. Activity teardown has a
+    finite `RuntimeConfig.ActivityTimeoutNs` bound (five seconds by default).
+    `stop()` returns `error.ActivityTimeout` without releasing the owning
+    machine when a callback does not cooperate; the existing `void deinit()`
+    logs that timeout and leaves the owner available for a later retry.
+    Activity callbacks remain a deliberately low-level concurrent callback API
+    matching the sibling runtimes: cancellation is cooperative and completion
+    or failure is observed by the callback's shared application state rather
+    than synthesized into a new public event protocol.
+    Qualified runtime timer events now use indexed current-state/
+    event lookup; generic/manual timer names retain the bounded transition-list
+    fallback. Zig exposes boundary partials through `SubmachineStateWithPartials`
+    because Zig cannot express a default `anytype` parameter on the compatibility
+    `SubmachineState(name, child)` signature.
 
 ## Key Differences from JavaScript
 
@@ -197,6 +282,12 @@ The Zig HSM implementation successfully adapts the JavaScript API pattern while 
 - **API Consistency**: Same function names and patterns
 - **Polyglot Compatibility**: Developers familiar with JavaScript HSM can easily use Zig HSM
 - **Language-Appropriate Design**: Uses Zig's compile-time features and type safety
-- **Performance**: Compile-time model building for zero runtime cost
+- **Performance**: Compile-time model description with precomputed runtime
+  indexes; ordinary events and qualified runtime timer events use average O(1)
+  state/event lookup, while generic/manual timer names retain the bounded
+  fallback. Model construction and transition execution retain their
+  proportional work, so full strict end-to-end O(1) dispatch remains unclaimed
+  because exit/entry/effect execution is proportional to the affected
+  configuration.
 
 The implementation provides a solid foundation for a polyglot HSM library that maintains consistency across languages while leveraging each language's strengths.

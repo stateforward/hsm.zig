@@ -185,15 +185,15 @@ test "Initial target with absolute paths" {
     try testing.expectEqualStrings("leaf", instance.final_state);
 }
 
-test "Multiple nested initial transitions with sibling paths" {
-    const model = comptime hsm.define("SiblingInitialTest", .{
+test "Multiple nested initial transitions with normalized relative paths" {
+    const model = comptime hsm.define("NormalizedRelativeInitialTest", .{
         hsm.initial(hsm.target("main_branch")),
         hsm.state("main_branch", .{
             hsm.entry(parentEntry),
-            hsm.initial(hsm.target("../side_branch/target")), // Up and across
+            hsm.initial(hsm.target("../main_branch/side_branch/target")), // Normalize up and back into the owner
             hsm.state("unused", .{hsm.entry(alternateEntry)}),
+            hsm.state("side_branch", .{ hsm.entry(siblingEntry), hsm.state("target", .{hsm.entry(leafEntry)}) }),
         }),
-        hsm.state("side_branch", .{ hsm.entry(siblingEntry), hsm.state("target", .{hsm.entry(leafEntry)}) }),
     });
 
     var built_model = try model.build(testing.allocator);
@@ -207,7 +207,7 @@ test "Multiple nested initial transitions with sibling paths" {
     var sm = try hsm.start(&context, &instance, &built_model);
     defer sm.deinit();
 
-    // Should start in main_branch then navigate up and across to side_branch/target
+    // Should start in main_branch then normalize back into side_branch/target
     try testing.expect(std.mem.endsWith(u8, sm.state(), "target"));
     try testing.expect(instance.initialization_count == 3);
     try testing.expectEqualStrings("parent", instance.initialization_sequence.items[0]);
@@ -309,15 +309,15 @@ test "Complex hierarchical initial resolution with mixed path types" {
             hsm.initial(hsm.target("level2a")), // Direct child
             hsm.state("level2a", .{
                 hsm.entry(childEntry),
-                hsm.initial(hsm.target("../level2b/level3")), // Sibling path
+                hsm.initial(hsm.target("../level2a/level2b/level3")), // Normalized descendant path
                 hsm.state("unused", .{hsm.entry(alternateEntry)}),
+                hsm.state("level2b", .{
+                    hsm.entry(siblingEntry),
+                    hsm.initial(hsm.target("/ComplexInitialTest/level1/level2a/level2b/level2c")), // Absolute descendant path
+                    hsm.state("level3", .{hsm.entry(grandchildEntry)}),
+                    hsm.state("level2c", .{hsm.entry(leafEntry)}),
+                }),
             }),
-            hsm.state("level2b", .{
-                hsm.entry(siblingEntry),
-                hsm.initial(hsm.target("/ComplexInitialTest/level1/level2c")), // Absolute path
-                hsm.state("level3", .{hsm.entry(grandchildEntry)}),
-            }),
-            hsm.state("level2c", .{hsm.entry(leafEntry)}),
         }),
     });
 
